@@ -31,6 +31,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 	static final String REMOTE_PORT4 = "11124"; //emulator-5562
 	static final int SERVER_PORT = 10000;
 	static final String INSERT = "insert";
+	static final String REPLICATE1 = "replicate1";
+	static final String REPLICATE2 = "replicate2";
 
 	private String myPort;
 	private ArrayList<String> ringOrder;
@@ -53,10 +55,6 @@ public class SimpleDynamoProvider extends ContentProvider {
         String key = values.getAsString("key");
         String value = values.getAsString("value");
         String targetPort = getOwner(key);
-        if(targetPort.equals(myPort)){
-            storeKVP(key, value);
-            return uri;
-        }
         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, INSERT, key, value, targetPort);
 		return uri;
 	}
@@ -126,6 +124,17 @@ public class SimpleDynamoProvider extends ContentProvider {
         return "something bad happened in getOwner";
 	}
 
+	public String getSucc(String port){
+	    for(int i = 0; i < ringOrder.size(); i++){
+	        if(ringOrder.get(i).equals(port)){
+	            if((i + 1) == ringOrder.size()){
+	                return ringOrder.get(0);
+                }
+	            return ringOrder.get(i + 1);
+            }
+        }
+        return "something bad happened in getSucc";
+    }
 
 	public String portToNodeID(String port) throws NoSuchAlgorithmException {
 		String emuID = "";
@@ -185,6 +194,26 @@ public class SimpleDynamoProvider extends ContentProvider {
                     DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                     out.writeBytes(message);
                 }
+                else if(msgType.equals(REPLICATE1)){
+                    String key = msgs[1];
+                    String value = msgs[2];
+                    String targetPort = msgs[3];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + key + "," + value + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
+                }
+                else if(msgType.equals(REPLICATE2)){
+                    String key = msgs[1];
+                    String value = msgs[2];
+                    String targetPort = msgs[3];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + key + "," + value + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
+                }
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -213,9 +242,28 @@ public class SimpleDynamoProvider extends ContentProvider {
                         String key = message[1];
                         String value = message[2];
                         String sourcePort = message[3];
-
+                        //If using storeKVP here doesn't work, I might need to use insert() itself
                         storeKVP(key, value);
-                        //TODO: Code for replication to next two nodes
+                        //Send first replica to successor
+                        String targetPort = getSucc(myPort);
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REPLICATE1, key, value, targetPort);
+                    }
+                    else if(msgType.equals(REPLICATE1)){
+                        String key = message[1];
+                        String value = message[2];
+                        String sourcePort = message[3];
+                        //If using storeKVP here doesn't work, I might need to use insert() itself
+                        storeKVP(key, value);
+                        //Send second replica to successor
+                        String targetPort = getSucc(myPort);
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REPLICATE2, key, value, targetPort);
+                    }
+                    else if(msgType.equals(REPLICATE2)){
+                        String key = message[1];
+                        String value = message[2];
+                        String sourcePort = message[3];
+                        //If using storeKVP here doesn't work, I might nee to use insert() itself
+                        storeKVP(key, value);
                     }
 
                 } catch (IOException e) {
