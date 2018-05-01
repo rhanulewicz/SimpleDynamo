@@ -2,6 +2,8 @@ package edu.buffalo.cse.cse486586.simpledynamo;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -11,11 +13,14 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Formatter;
+import java.util.Scanner;
+import java.util.concurrent.ArrayBlockingQueue;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
+import android.database.MatrixCursor;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.telephony.TelephonyManager;
@@ -30,16 +35,25 @@ public class SimpleDynamoProvider extends ContentProvider {
 	static final String REMOTE_PORT3 = "11120"; //emulator-5560
 	static final String REMOTE_PORT4 = "11124"; //emulator-5562
 	static final int SERVER_PORT = 10000;
+
 	static final String INSERT = "insert";
 	static final String REPLICATE1 = "replicate1";
 	static final String REPLICATE2 = "replicate2";
+	static final String DELETE = "delete";
+	static final String DELETE_REPLICA1 = "delete_replica1";
+	static final String DELETE_REPLICA2 = "delete_replica2";
+	static final String QUERY = "query";
+	static final String QUERY_RESPONSE = "query_response";
 
 	private String myPort;
 	private ArrayList<String> ringOrder;
+    private ArrayBlockingQueue<String> qResponse;
 
 	@Override
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
-		// TODO Auto-generated method stub
+		Log.v("delete",  selection);
+		String targetPort = getOwner(selection);
+        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE, selection, targetPort);
 		return 0;
 	}
 
@@ -92,6 +106,8 @@ public class SimpleDynamoProvider extends ContentProvider {
         } catch (IOException e) {
             e.printStackTrace();
         }
+
+        qResponse = new ArrayBlockingQueue<String>(10);
 
         //TODO: Logic for recovering nodes
             //Contact successor and recover replicas and missed writes
@@ -152,11 +168,57 @@ public class SimpleDynamoProvider extends ContentProvider {
 		return genHash(emuID);
 	}
 
+    public Cursor buildCursor(String key, String value){
+        String[] col = new String[2];
+        col[0] = "key";
+        col[1] = "value";
+        MatrixCursor curs = new MatrixCursor(col);
+
+        String[] val = new String[2];
+        val[0] = key;
+        val[1] = value;
+        curs.addRow(val);
+
+        return curs;
+    }
+
 	@Override
 	public Cursor query(Uri uri, String[] projection, String selection,
 			String[] selectionArgs, String sortOrder) {
-		// TODO Auto-generated method stub
-		return null;
+        Log.v("query", selection);
+        if(selection.equals("@")){
+            //Query everything locally
+            String[] allKeys = getContext().fileList();
+            String[] col = new String[2];
+            col[0] = "key";
+            col[1] = "value";
+            MatrixCursor curs = new MatrixCursor(col);
+            for(String key : allKeys){
+                FileInputStream inputStream = null;
+                try {
+                    inputStream = getContext().openFileInput(key);
+                } catch (FileNotFoundException e) {
+                    e.printStackTrace();
+                }
+                Scanner s = new Scanner(inputStream);
+                String value = s.next();
+                String[] val = new String[2];
+                val[0] = key;
+                val[1] = value;
+                curs.addRow(val);
+            }
+            return curs;
+        }
+	    String owner = getOwner(selection);
+	    String targetPort = getSucc(getSucc(owner));
+        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, QUERY, selection, targetPort);
+        String value = null;
+        try {
+            value = qResponse.take();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        return buildCursor(selection, value);
 	}
 
 	@Override
@@ -214,6 +276,52 @@ public class SimpleDynamoProvider extends ContentProvider {
                     DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                     out.writeBytes(message);
                 }
+                else if(msgType.equals(DELETE)){
+                    String key = msgs[1];
+                    String targetPort = msgs[2];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + key + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
+                }
+                else if(msgType.equals(DELETE_REPLICA1)){
+                    String key = msgs[1];
+                    String targetPort = msgs[2];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + key + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
+                }
+                else if(msgType.equals(DELETE_REPLICA2)){
+                    String key = msgs[1];
+                    String targetPort = msgs[2];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + key + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
+                }
+                else if(msgType.equals(QUERY)){
+                    String key = msgs[1];
+                    String targetPort = msgs[2];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + key + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
+                }
+                else if(msgType.equals(QUERY_RESPONSE)){
+                    String value = msgs[1];
+                    String targetPort = msgs[2];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + value + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
+
+                }
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -264,6 +372,45 @@ public class SimpleDynamoProvider extends ContentProvider {
                         String sourcePort = message[3];
                         //If using storeKVP here doesn't work, I might nee to use insert() itself
                         storeKVP(key, value);
+                    }
+                    else if(msgType.equals(DELETE)){
+                        String key = message[1];
+                        String sourcePort = message[2];
+                        //If this doesnt work here, may need to use delete() itself
+                        getContext().deleteFile(key);
+                        //Tell successor to delete its replica
+                        String targetPort = getSucc(myPort);
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE_REPLICA1, key, targetPort);
+                    }
+                    else if(msgType.equals(DELETE_REPLICA1)){
+                        String key = message[1];
+                        String sourcePort = message[2];
+                        //If this doesnt work here, may need to use delete() itself
+                        getContext().deleteFile(key);
+                        //Tell successor to delete its replica
+                        String targetPort = getSucc(myPort);
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE_REPLICA2, key, targetPort);
+                    }
+                    else if(msgType.equals(DELETE_REPLICA2)){
+                        String key = message[1];
+                        String sourcePort = message[2];
+                        //If this doesnt work here, may need to use delete() itself
+                        getContext().deleteFile(key);
+                    }
+                    else if(msgType.equals(QUERY)){
+                        String key = message[1];
+                        String sourcePort = message[2];
+
+                        FileInputStream inputStream = getContext().openFileInput(key);
+                        Scanner s = new Scanner(inputStream);
+                        String value = s.next();
+                        Log.e("Sending to " + sourcePort, value);
+
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, QUERY_RESPONSE, value, sourcePort);
+                    }
+                    else if(msgType.equals(QUERY_RESPONSE)){
+                        String value = message[1];
+                        qResponse.offer(value);
                     }
 
                 } catch (IOException e) {
