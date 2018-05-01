@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Formatter;
 import java.util.Scanner;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
@@ -44,10 +45,14 @@ public class SimpleDynamoProvider extends ContentProvider {
 	static final String DELETE_REPLICA2 = "delete_replica2";
 	static final String QUERY = "query";
 	static final String QUERY_RESPONSE = "query_response";
+	static final String QUERY_ALL = "query_all";
+	static final String QUERY_ALL_RESPONSE = "query_all_response";
 
 	private String myPort;
 	private ArrayList<String> ringOrder;
     private ArrayBlockingQueue<String> qResponse;
+    private ArrayBlockingQueue<String> gdumpBlocker;
+    private ArrayList<String> globalDump;
 
 	@Override
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
@@ -108,6 +113,8 @@ public class SimpleDynamoProvider extends ContentProvider {
         }
 
         qResponse = new ArrayBlockingQueue<String>(10);
+        globalDump = new ArrayList<String>();
+        gdumpBlocker = new ArrayBlockingQueue<String>(10);
 
         //TODO: Logic for recovering nodes
             //Contact successor and recover replicas and missed writes
@@ -186,6 +193,37 @@ public class SimpleDynamoProvider extends ContentProvider {
 	public Cursor query(Uri uri, String[] projection, String selection,
 			String[] selectionArgs, String sortOrder) {
         Log.v("query", selection);
+        if(selection.equals("*")){
+            globalDump.clear();
+            //Multicast query to all nodes
+            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, QUERY_ALL);
+            //Wait for each node to finish responding.
+            try {
+                TimeUnit.SECONDS.sleep(8);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+            //How? Poll gDumpBlocker 5 times!
+                //What if a node is failed? Use poll() with a timeout!
+
+            //Then build the cursor and return it
+            String[] col = new String[2];
+            col[0] = "key";
+            col[1] = "value";
+            MatrixCursor curs = new MatrixCursor(col);
+            //Collections.sort(globalDump);
+            for(String entry : globalDump){
+                String[] e = entry.split(",");
+                String key = e[0];
+                String value = e[1];
+                String[] val = new String[2];
+                val[0] = key;
+                val[1] = value;
+                Log.e("Adding to cursor " , key + "," + value);
+                curs.addRow(val);
+            }
+            return curs;
+        }
         if(selection.equals("@")){
             //Query everything locally
             String[] allKeys = getContext().fileList();
@@ -320,7 +358,14 @@ public class SimpleDynamoProvider extends ContentProvider {
                     String message = msgType + "," + value + "," + myPort + '\n';
                     DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                     out.writeBytes(message);
-
+                }
+                else if(msgType.equals(QUERY_ALL)){
+                    for(String nodePort : ringOrder){
+                        Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(nodePort));
+                        String message = msgType + "," + myPort + '\n';
+                        DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                        out.writeBytes(message);
+                    }
                 }
             } catch (IOException e) {
                 e.printStackTrace();
@@ -411,6 +456,33 @@ public class SimpleDynamoProvider extends ContentProvider {
                     else if(msgType.equals(QUERY_RESPONSE)){
                         String value = message[1];
                         qResponse.offer(value);
+                    }
+                    else if(msgType.equals(QUERY_ALL)){
+                        String sourcePort = message[1];
+
+                        //Get all local entries
+                        Cursor curs = query(null, null, "@", null, null);
+                        //Send them all one-by-one to the source
+                        curs.moveToFirst();
+
+                        for(int i = 0; i < curs.getCount(); i++){
+                            String key = curs.getString(0);
+                            String value = curs.getString(1);
+
+                            Socket sock = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(sourcePort));
+                            String msg = QUERY_ALL_RESPONSE + "," + key + "," + value + "," + myPort + '\n';
+                            DataOutputStream out = new DataOutputStream(sock.getOutputStream());
+                            out.writeBytes(msg);
+
+                            curs.moveToNext();
+                        }
+                    }
+                    else if(msgType.equals(QUERY_ALL_RESPONSE)){
+                        String key = message[1];
+                        String value = message[2];
+                        String sourcePort = message[3];
+
+                        globalDump.add(key + "," + value);
                     }
 
                 } catch (IOException e) {
