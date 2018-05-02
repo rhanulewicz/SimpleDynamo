@@ -39,7 +39,10 @@ public class SimpleDynamoProvider extends ContentProvider {
 	static final int SERVER_PORT = 10000;
 
 	static final String INSERT = "insert";
+	static final String INSERT_SUCCESS = "insert_success";
 	static final String REPLICATE1 = "replicate1";
+	static final String REPLICATE_SUCCESS = "replicate_success";
+	static final String REPLICATE1_NOREPLY = "replicate1_noreply";
 	static final String REPLICATE2 = "replicate2";
 	static final String DELETE = "delete";
 	static final String DELETE_REPLICA1 = "delete_replica1";
@@ -56,6 +59,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 	private ArrayList<String> ringOrder;
     private ArrayBlockingQueue<String> qResponse;
     private ArrayBlockingQueue<String> gdumpBlocker;
+    private ArrayBlockingQueue<String> insertResponse;
+    private ArrayBlockingQueue<String> replicaResponse;
     private ArrayList<String> globalDump;
     private ReentrantLock queryLock;
 
@@ -93,7 +98,21 @@ public class SimpleDynamoProvider extends ContentProvider {
         String key = values.getAsString("key");
         String value = values.getAsString("value");
         String targetPort = getOwner(key);
+
+        //This might need to be locked down from HERE//
         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, INSERT, key, value, targetPort);
+        //Wait for confirmation that insert was processed by targetPort
+        String response = null;
+        try {
+            response = insertResponse.poll(8, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        //After a timeout, assume targetPort is dead, and just REPLICATE1 to targetPort's successor
+        if(response == null){
+            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REPLICATE1_NOREPLY, key, value, getSucc(targetPort));
+        }
+        //To HERE. But I'm not sure. Think about this more.//
 		return uri;
 	}
 
@@ -134,6 +153,8 @@ public class SimpleDynamoProvider extends ContentProvider {
         qResponse = new ArrayBlockingQueue<String>(10);
         globalDump = new ArrayList<String>();
         gdumpBlocker = new ArrayBlockingQueue<String>(10);
+        insertResponse = new ArrayBlockingQueue<String>(10);
+        replicaResponse = new ArrayBlockingQueue<String>(10);
         queryLock = new ReentrantLock();
 
         //Contact predecessor and successor and recover replicas and missed writes
@@ -341,6 +362,16 @@ public class SimpleDynamoProvider extends ContentProvider {
                     DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                     out.writeBytes(message);
                 }
+                else if(msgType.equals(REPLICATE1_NOREPLY)){
+                    String key = msgs[1];
+                    String value = msgs[2];
+                    String targetPort = msgs[3];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + key + "," + value + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
+                }
                 else if(msgType.equals(REPLICATE2)){
                     String key = msgs[1];
                     String value = msgs[2];
@@ -420,6 +451,22 @@ public class SimpleDynamoProvider extends ContentProvider {
                     DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                     out.writeBytes(message);
                 }
+                else if(msgType.equals(INSERT_SUCCESS)){
+                    String targetPort = msgs[1];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
+                }
+                else if(msgType.equals(REPLICATE_SUCCESS)){
+                    String targetPort = msgs[1];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
+                }
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -450,11 +497,39 @@ public class SimpleDynamoProvider extends ContentProvider {
                         String sourcePort = message[3];
                         //If using storeKVP here doesn't work, I might need to use insert() itself
                         storeKVP(key, value);
+                        //Send confirmation back to sourcePort
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, INSERT_SUCCESS, sourcePort);
                         //Send first replica to successor
                         String targetPort = getSucc(myPort);
+
+                        //This might need to be locked down from HERE//
                         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REPLICATE1, key, value, targetPort);
+                        //Wait for confirmation that replication was processed by targetPort
+                        String response = null;
+                        try {
+                            response = replicaResponse.poll(8, TimeUnit.SECONDS);
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
+                        }
+                        //After a timeout, assume targetPort is dead, and just REPLICATE2 to targetPort's successor
+                        if(response == null){
+                            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REPLICATE2, key, value, getSucc(targetPort));
+                        }
+                        //To HERE. Not sure.//
                     }
                     else if(msgType.equals(REPLICATE1)){
+                        String key = message[1];
+                        String value = message[2];
+                        String sourcePort = message[3];
+                        //If using storeKVP here doesn't work, I might need to use insert() itself
+                        storeKVP(key, value);
+                        //Send confirmation back to sourcePort
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REPLICATE_SUCCESS, sourcePort);
+                        //Send second replica to successor
+                        String targetPort = getSucc(myPort);
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REPLICATE2, key, value, targetPort);
+                    }
+                    else if(msgType.equals(REPLICATE1_NOREPLY)){
                         String key = message[1];
                         String value = message[2];
                         String sourcePort = message[3];
@@ -592,6 +667,14 @@ public class SimpleDynamoProvider extends ContentProvider {
                         String sourcePort = message[3];
 
                         storeKVP(key, value);
+                    }
+                    else if(msgType.equals(INSERT_SUCCESS)){
+                        String sourcePort = message[1];
+                        insertResponse.offer(sourcePort); //Arbitrary string. Might as well use sourcePort.
+                    }
+                    else if(msgType.equals(REPLICATE_SUCCESS)){
+                        String sourcePort = message[1];
+                        replicaResponse.offer(sourcePort); //Arbitrary string. Might as well use sourcePort.
                     }
 
                 } catch (IOException e) {
