@@ -46,6 +46,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 	static final String REPLICATE2 = "replicate2";
 	static final String DELETE = "delete";
 	static final String DELETE_REPLICA1 = "delete_replica1";
+    static final String DELETE_REPLICA_SUCCESS = "delete_replica_success";
+	static final String DELETE_REPLICA1_NOREPLY = "delete_replica1_noreply";
 	static final String DELETE_REPLICA2 = "delete_replica2";
 	static final String QUERY = "query";
 	static final String QUERY_RESPONSE = "query_response";
@@ -61,6 +63,8 @@ public class SimpleDynamoProvider extends ContentProvider {
     private ArrayBlockingQueue<String> gdumpBlocker;
     private ArrayBlockingQueue<String> insertResponse;
     private ArrayBlockingQueue<String> replicaResponse;
+    private ArrayBlockingQueue<String> deleteResponse;
+    private ArrayBlockingQueue<String> deleteReplicaResponse;
     private ArrayList<String> globalDump;
     private ReentrantLock queryLock;
 
@@ -82,7 +86,21 @@ public class SimpleDynamoProvider extends ContentProvider {
             return 0;
         }
 		String targetPort = getOwner(selection);
+
+        //Might need lock HERE//
         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE, selection, targetPort);
+        //Wait for confirmation that delete was processed by targetPort
+        String response = null;
+        try {
+            response = deleteResponse.poll(8, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        //After a timeout, assume targetPort is dead, and just DELETE_REPLICA1_NOREPLY to targetPort's successor
+        if(response == null){
+            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE_REPLICA1_NOREPLY, selection, getSucc(targetPort));
+        }
+        //To HERE//
 		return 0;
 	}
 
@@ -155,6 +173,8 @@ public class SimpleDynamoProvider extends ContentProvider {
         gdumpBlocker = new ArrayBlockingQueue<String>(10);
         insertResponse = new ArrayBlockingQueue<String>(10);
         replicaResponse = new ArrayBlockingQueue<String>(10);
+        deleteResponse = new ArrayBlockingQueue<String>(10);
+        deleteReplicaResponse = new ArrayBlockingQueue<String>(10);
         queryLock = new ReentrantLock();
 
         //Contact predecessor and successor and recover replicas and missed writes
@@ -400,6 +420,15 @@ public class SimpleDynamoProvider extends ContentProvider {
                     DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                     out.writeBytes(message);
                 }
+                else if(msgType.equals(DELETE_REPLICA1_NOREPLY)){
+                    String key = msgs[1];
+                    String targetPort = msgs[2];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + key + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
+                }
                 else if(msgType.equals(DELETE_REPLICA2)){
                     String key = msgs[1];
                     String targetPort = msgs[2];
@@ -553,9 +582,34 @@ public class SimpleDynamoProvider extends ContentProvider {
                         getContext().deleteFile(key);
                         //Tell successor to delete its replica
                         String targetPort = getSucc(myPort);
+
+                        //Might need lock from HERE//
                         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE_REPLICA1, key, targetPort);
+                        //Wait for confirmation that replica was deleted by targetPort
+                        String response = null;
+                        try {
+                            response = deleteReplicaResponse.poll(8, TimeUnit.SECONDS);
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
+                        }
+                        //After a timeout, assume targetPort is dead, and just DELETE_REPLICA2 to targetPort's successor
+                        if(response == null){
+                            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE_REPLICA2, key, getSucc(targetPort));
+                        }
+                        //To HERE//
                     }
                     else if(msgType.equals(DELETE_REPLICA1)){
+                        String key = message[1];
+                        String sourcePort = message[2];
+                        //If this doesnt work here, may need to use delete() itself
+                        getContext().deleteFile(key);
+                        //Send confirmation back to sourcePort
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE_REPLICA_SUCCESS, sourcePort);
+                        //Tell successor to delete its replica
+                        String targetPort = getSucc(myPort);
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE_REPLICA2, key, targetPort);
+                    }
+                    else if(msgType.equals(DELETE_REPLICA1_NOREPLY)){
                         String key = message[1];
                         String sourcePort = message[2];
                         //If this doesnt work here, may need to use delete() itself
@@ -675,6 +729,10 @@ public class SimpleDynamoProvider extends ContentProvider {
                     else if(msgType.equals(REPLICATE_SUCCESS)){
                         String sourcePort = message[1];
                         replicaResponse.offer(sourcePort); //Arbitrary string. Might as well use sourcePort.
+                    }
+                    else if(msgType.equals(DELETE_REPLICA_SUCCESS)){
+                        String sourcePort = message[1];
+                        deleteReplicaResponse.offer(sourcePort); //Arbitrary string. Might as well use sourcePort.
                     }
 
                 } catch (IOException e) {
