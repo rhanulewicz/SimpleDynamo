@@ -48,7 +48,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 	static final String QUERY_RESPONSE = "query_response";
 	static final String QUERY_ALL = "query_all";
 	static final String QUERY_ALL_RESPONSE = "query_all_response";
-	static final String REVIVAL = "revival";
+	static final String REVIVAL_SUCC = "revival_succ";
+	static final String REVIVAL_PRED = "revival_pred";
 	static final String REVIVAL_RESPONSE = "revival_response";
 
 	private String myPort;
@@ -57,6 +58,12 @@ public class SimpleDynamoProvider extends ContentProvider {
     private ArrayBlockingQueue<String> gdumpBlocker;
     private ArrayList<String> globalDump;
     private ReentrantLock queryLock;
+
+    /*
+       FULL DISCLAIMER: My code is extremely verbose and there's a lot unnecessary duplicate code.
+       This is because in the interest of time, instead of thinking about unnecessary ways to organize
+       the code, I just did everything in the "most obvious" way. Sorry it's so bloated!
+     */
 
 	@Override
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
@@ -121,9 +128,12 @@ public class SimpleDynamoProvider extends ContentProvider {
         gdumpBlocker = new ArrayBlockingQueue<String>(10);
         queryLock = new ReentrantLock();
 
-        //Contact successor and recover replicas and missed writes
-        String targetPort = getSucc(myPort);
-        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REVIVAL, targetPort);
+        //Contact predecessor and successor and recover replicas and missed writes
+            //Thought: we should delete everything leftover on revival. The successor will restore everything that should be there.
+        String succPort = getSucc(myPort);
+        String predPort = getPred(myPort);
+        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REVIVAL_SUCC, succPort);
+        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REVIVAL_PRED, predPort);
 
 		return false;
 	}
@@ -163,6 +173,10 @@ public class SimpleDynamoProvider extends ContentProvider {
             }
         }
         return "something bad happened in getSucc";
+    }
+
+    public String getPred(String port){
+	    return getSucc(getSucc(getSucc(getSucc(port))));
     }
 
 	public String portToNodeID(String port) throws NoSuchAlgorithmException {
@@ -375,7 +389,15 @@ public class SimpleDynamoProvider extends ContentProvider {
                         out.writeBytes(message);
                     }
                 }
-                else if(msgType.equals(REVIVAL)){
+                else if(msgType.equals(REVIVAL_SUCC)){
+                    String targetPort = msgs[1];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
+                }
+                else if(msgType.equals(REVIVAL_PRED)){
                     String targetPort = msgs[1];
 
                     Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
@@ -500,13 +522,14 @@ public class SimpleDynamoProvider extends ContentProvider {
 
                         globalDump.add(key + "," + value);
                     }
-                    else if(msgType.equals(REVIVAL)){
+                    else if(msgType.equals(REVIVAL_SUCC)){
+                        /*I've received notice of my predecessor's revival.
+                          I must now send all key-value pairs that it should own to it.*/
                         String predPort = message[1];
-                        //I've received notice of my predecessor's revival.
-                        //I must now send all key-value pairs that it should own to it.
-                        
+
                         //Get all local entries
                         Cursor curs = query(null, null, "@", null, null);
+
                         //Send them all one-by-one to your predecessor if they should belong to it
                         curs.moveToFirst();
 
@@ -515,6 +538,32 @@ public class SimpleDynamoProvider extends ContentProvider {
                             String value = curs.getString(1);
                             if(getOwner(key).equals(predPort)){
                                 Socket sock = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(predPort));
+                                String msg = REVIVAL_RESPONSE + "," + key + "," + value + "," + myPort + '\n';
+                                DataOutputStream out = new DataOutputStream(sock.getOutputStream());
+                                out.writeBytes(msg);
+                            }
+                            curs.moveToNext();
+                        }
+                    }
+                    else if(msgType.equals(REVIVAL_PRED)){
+                        /*I've received notice of my successor's revival.
+                          I must now send all key-value pairs that are owned by myself and my
+                          predecessor to it as replicas. */
+
+                        String succPort = message[1];
+                        String predPort = getPred(myPort);
+
+                        //Get all local entries
+                        Cursor curs = query(null, null, "@", null, null);
+
+                        //Send them all one-by-one to your successor if they are owned by yourself or your predecessor
+                        curs.moveToFirst();
+
+                        for(int i = 0; i < curs.getCount(); i++){
+                            String key = curs.getString(0);
+                            String value = curs.getString(1);
+                            if(getOwner(key).equals(predPort) || getOwner(key).equals(myPort)){
+                                Socket sock = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(succPort));
                                 String msg = REVIVAL_RESPONSE + "," + key + "," + value + "," + myPort + '\n';
                                 DataOutputStream out = new DataOutputStream(sock.getOutputStream());
                                 out.writeBytes(msg);
