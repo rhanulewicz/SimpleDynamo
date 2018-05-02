@@ -68,6 +68,14 @@ public class SimpleDynamoProvider extends ContentProvider {
 	@Override
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
 		Log.v("delete",  selection);
+        if(selection.equals("@")){
+            //Delete everything locally
+            String[] allKeys = getContext().fileList();
+            for(String key : allKeys){
+                getContext().deleteFile(key);
+            }
+            return 0;
+        }
 		String targetPort = getOwner(selection);
         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE, selection, targetPort);
 		return 0;
@@ -129,7 +137,8 @@ public class SimpleDynamoProvider extends ContentProvider {
         queryLock = new ReentrantLock();
 
         //Contact predecessor and successor and recover replicas and missed writes
-            //Thought: we should delete everything leftover on revival. The successor will restore everything that should be there.
+        //We should delete everything leftover on revival. Everything will be restored.
+        delete(null, "@", null);
         String succPort = getSucc(myPort);
         String predPort = getPred(myPort);
         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REVIVAL_SUCC, succPort);
