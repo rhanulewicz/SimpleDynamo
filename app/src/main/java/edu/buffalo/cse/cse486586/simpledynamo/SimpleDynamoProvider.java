@@ -48,6 +48,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 	static final String QUERY_RESPONSE = "query_response";
 	static final String QUERY_ALL = "query_all";
 	static final String QUERY_ALL_RESPONSE = "query_all_response";
+	static final String REVIVAL = "revival";
+	static final String REVIVAL_RESPONSE = "revival_response";
 
 	private String myPort;
 	private ArrayList<String> ringOrder;
@@ -119,8 +121,9 @@ public class SimpleDynamoProvider extends ContentProvider {
         gdumpBlocker = new ArrayBlockingQueue<String>(10);
         queryLock = new ReentrantLock();
 
-        //TODO: Logic for recovering nodes
-            //Contact successor and recover replicas and missed writes
+        //Contact successor and recover replicas and missed writes
+        String targetPort = getSucc(myPort);
+        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REVIVAL, targetPort);
 
 		return false;
 	}
@@ -372,6 +375,14 @@ public class SimpleDynamoProvider extends ContentProvider {
                         out.writeBytes(message);
                     }
                 }
+                else if(msgType.equals(REVIVAL)){
+                    String targetPort = msgs[1];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
+                }
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -488,6 +499,35 @@ public class SimpleDynamoProvider extends ContentProvider {
                         String sourcePort = message[3];
 
                         globalDump.add(key + "," + value);
+                    }
+                    else if(msgType.equals(REVIVAL)){
+                        String predPort = message[1];
+                        //I've received notice of my predecessor's revival.
+                        //I must now send all key-value pairs that it should own to it.
+                        
+                        //Get all local entries
+                        Cursor curs = query(null, null, "@", null, null);
+                        //Send them all one-by-one to your predecessor if they should belong to it
+                        curs.moveToFirst();
+
+                        for(int i = 0; i < curs.getCount(); i++){
+                            String key = curs.getString(0);
+                            String value = curs.getString(1);
+                            if(getOwner(key).equals(predPort)){
+                                Socket sock = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(predPort));
+                                String msg = REVIVAL_RESPONSE + "," + key + "," + value + "," + myPort + '\n';
+                                DataOutputStream out = new DataOutputStream(sock.getOutputStream());
+                                out.writeBytes(msg);
+                            }
+                            curs.moveToNext();
+                        }
+                    }
+                    else if(msgType.equals(REVIVAL_RESPONSE)){
+                        String key = message[1];
+                        String value = message[2];
+                        String sourcePort = message[3];
+
+                        storeKVP(key, value);
                     }
 
                 } catch (IOException e) {
