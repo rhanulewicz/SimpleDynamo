@@ -16,6 +16,7 @@ import java.util.Formatter;
 import java.util.Scanner;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
@@ -53,6 +54,7 @@ public class SimpleDynamoProvider extends ContentProvider {
     private ArrayBlockingQueue<String> qResponse;
     private ArrayBlockingQueue<String> gdumpBlocker;
     private ArrayList<String> globalDump;
+    private ReentrantLock queryLock;
 
 	@Override
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
@@ -115,6 +117,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         qResponse = new ArrayBlockingQueue<String>(10);
         globalDump = new ArrayList<String>();
         gdumpBlocker = new ArrayBlockingQueue<String>(10);
+        queryLock = new ReentrantLock();
 
         //TODO: Logic for recovering nodes
             //Contact successor and recover replicas and missed writes
@@ -197,13 +200,13 @@ public class SimpleDynamoProvider extends ContentProvider {
             globalDump.clear();
             //Multicast query to all nodes
             new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, QUERY_ALL);
-            //Wait for each node to finish responding.
+            //Wait for nodes to finish responding.
             try {
                 TimeUnit.SECONDS.sleep(8);
             } catch (InterruptedException e) {
                 e.printStackTrace();
             }
-            //How? Poll gDumpBlocker 5 times!
+            //How to do this more deterministically? Poll gDumpBlocker 5 times!
                 //What if a node is failed? Use poll() with a timeout!
 
             //Then build the cursor and return it
@@ -249,6 +252,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         }
 	    String owner = getOwner(selection);
 	    String targetPort = getSucc(getSucc(owner));
+	    queryLock.lock();
         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, QUERY, selection, targetPort);
         String value = null;
         try {
@@ -256,6 +260,7 @@ public class SimpleDynamoProvider extends ContentProvider {
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
+        queryLock.unlock();
         return buildCursor(selection, value);
 	}
 
