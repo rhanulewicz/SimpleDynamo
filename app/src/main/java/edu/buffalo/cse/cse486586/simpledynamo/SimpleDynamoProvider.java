@@ -277,12 +277,18 @@ public class SimpleDynamoProvider extends ContentProvider {
             return curs;
         }
 	    String owner = getOwner(selection);
-	    String targetPort = getSucc(getSucc(owner));
+        String targetPortBackup = getSucc(owner);
+	    String targetPort = getSucc(targetPortBackup);
 	    queryLock.lock();
         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, QUERY, selection, targetPort);
         String value = null;
         try {
-            value = qResponse.take();
+            value = qResponse.poll(8, TimeUnit.SECONDS);
+            //If we dont get a response within timeout, assume node is dead and contact its pred
+            if(value == null){
+                new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, QUERY, selection, targetPortBackup);
+                value = qResponse.take();
+            }
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
