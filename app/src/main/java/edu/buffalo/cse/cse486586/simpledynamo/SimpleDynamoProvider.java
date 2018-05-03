@@ -41,11 +41,14 @@ public class SimpleDynamoProvider extends ContentProvider {
 	static final String INSERT = "insert";
 	static final String INSERT_SUCCESS = "insert_success";
 	static final String REPLICATE1 = "replicate1";
+    static final String REPLICATE1_WAIT = "replicate1";
 	static final String REPLICATE_SUCCESS = "replicate_success";
 	static final String REPLICATE1_NOREPLY = "replicate1_noreply";
 	static final String REPLICATE2 = "replicate2";
 	static final String DELETE = "delete";
+	static final String DELETE_SUCCESS = "delete_success";
 	static final String DELETE_REPLICA1 = "delete_replica1";
+	static final String DELETE_REPLICA1_WAIT = "delete_replica1_wait";
     static final String DELETE_REPLICA_SUCCESS = "delete_replica_success";
 	static final String DELETE_REPLICA1_NOREPLY = "delete_replica1_noreply";
 	static final String DELETE_REPLICA2 = "delete_replica2";
@@ -56,7 +59,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 	static final String REVIVAL_SUCC = "revival_succ";
 	static final String REVIVAL_PRED = "revival_pred";
 	static final String REVIVAL_RESPONSE = "revival_response";
-
+    static final int timeout = 4;
 	private String myPort;
 	private ArrayList<String> ringOrder;
     private ArrayBlockingQueue<String> qResponse;
@@ -92,12 +95,14 @@ public class SimpleDynamoProvider extends ContentProvider {
         //Wait for confirmation that delete was processed by targetPort
         String response = null;
         try {
-            response = deleteResponse.poll(8, TimeUnit.SECONDS);
+            Log.e("Waiting on", "deleteResponse");
+            response = deleteResponse.poll(timeout, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
         //After a timeout, assume targetPort is dead, and just DELETE_REPLICA1_NOREPLY to targetPort's successor
         if(response == null){
+            Log.e(targetPort + " timed out", "deleteResponse");
             new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE_REPLICA1_NOREPLY, selection, getSucc(targetPort));
         }
         //To HERE//
@@ -122,12 +127,14 @@ public class SimpleDynamoProvider extends ContentProvider {
         //Wait for confirmation that insert was processed by targetPort
         String response = null;
         try {
-            response = insertResponse.poll(8, TimeUnit.SECONDS);
+            Log.e("Waiting on", "insertResponse");
+            response = insertResponse.poll(timeout, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
         //After a timeout, assume targetPort is dead, and just REPLICATE1 to targetPort's successor
         if(response == null){
+            Log.e(targetPort + " timed out", "insertResponse");
             new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REPLICATE1_NOREPLY, key, value, getSucc(targetPort));
         }
         //To HERE. But I'm not sure. Think about this more.//
@@ -179,13 +186,19 @@ public class SimpleDynamoProvider extends ContentProvider {
 
         //Contact predecessor and successor and recover replicas and missed writes
         //We should delete everything leftover on revival. Everything will be restored.
+//        queryLock.lock();
         delete(null, "@", null);
         String succPort = getSucc(myPort);
         String predPort = getPred(myPort);
         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REVIVAL_SUCC, succPort);
         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REVIVAL_PRED, predPort);
-
-		return false;
+//        try {
+//            TimeUnit.SECONDS.sleep(8);
+//        } catch (InterruptedException e) {
+//            e.printStackTrace();
+//        }
+//        queryLock.unlock();
+        return false;
 	}
 
 	//Given a key, determines which node is responsible for that key
@@ -269,7 +282,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, QUERY_ALL);
             //Wait for nodes to finish responding.
             try {
-                TimeUnit.SECONDS.sleep(8);
+                TimeUnit.SECONDS.sleep(timeout);
             } catch (InterruptedException e) {
                 e.printStackTrace();
             }
@@ -324,9 +337,11 @@ public class SimpleDynamoProvider extends ContentProvider {
         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, QUERY, selection, targetPort);
         String value = null;
         try {
-            value = qResponse.poll(8, TimeUnit.SECONDS);
+            Log.e("Waiting on", "qResponse");
+            value = qResponse.poll(timeout, TimeUnit.SECONDS);
             //If we dont get a response within timeout, assume node is dead and contact its pred
             if(value == null){
+                Log.e(targetPort + " timed out", "qResponse");
                 new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, QUERY, selection, targetPortBackup);
                 value = qResponse.take();
             }
@@ -382,6 +397,25 @@ public class SimpleDynamoProvider extends ContentProvider {
                     DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                     out.writeBytes(message);
                 }
+                else if(msgType.equals(REPLICATE1_WAIT)){
+                    String key = msgs[1];
+                    String value = msgs[2];
+                    String targetPort = msgs[3];
+
+                    //Wait for confirmation that replication was processed by targetPort
+                    String response = null;
+                    try {
+                        Log.e("Waiting on", "replicaResponse");
+                        response = replicaResponse.poll(timeout, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                    //After a timeout, assume targetPort is dead, and just REPLICATE2 to targetPort's successor
+                    if(response == null){
+                        Log.e(targetPort + " timed out", "replicaResponse");
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REPLICATE2, key, value, getSucc(targetPort));
+                    }
+                }
                 else if(msgType.equals(REPLICATE1_NOREPLY)){
                     String key = msgs[1];
                     String value = msgs[2];
@@ -419,6 +453,23 @@ public class SimpleDynamoProvider extends ContentProvider {
                     String message = msgType + "," + key + "," + myPort + '\n';
                     DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                     out.writeBytes(message);
+                }
+                else if(msgType.equals(DELETE_REPLICA1_WAIT)){
+                    String key = msgs[1];
+                    String targetPort = msgs[2];
+                    //Wait for confirmation that replica was deleted by targetPort
+                    String response = null;
+                    try {
+                        Log.e("Waiting on", "deleteReplicaResponse");
+                        response = deleteReplicaResponse.poll(timeout, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                    //After a timeout, assume targetPort is dead, and just DELETE_REPLICA2 to targetPort's successor
+                    if(response == null) {
+                        Log.e(targetPort + " timed out", "deleteReplicaResponse");
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE_REPLICA2, key, getSucc(targetPort));
+                    }
                 }
                 else if(msgType.equals(DELETE_REPLICA1_NOREPLY)){
                     String key = msgs[1];
@@ -495,6 +546,21 @@ public class SimpleDynamoProvider extends ContentProvider {
                     String message = msgType + "," + myPort + '\n';
                     DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                     out.writeBytes(message);
+                }else if(msgType.equals(DELETE_SUCCESS)){
+                    String targetPort = msgs[1];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
+                }
+                else if(msgType.equals(DELETE_REPLICA_SUCCESS)){
+                    String targetPort = msgs[1];
+
+                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(targetPort));
+                    String message = msgType + "," + myPort + '\n';
+                    DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                    out.writeBytes(message);
                 }
             } catch (IOException e) {
                 e.printStackTrace();
@@ -533,17 +599,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 
                         //This might need to be locked down from HERE//
                         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REPLICATE1, key, value, targetPort);
-                        //Wait for confirmation that replication was processed by targetPort
-                        String response = null;
-                        try {
-                            response = replicaResponse.poll(8, TimeUnit.SECONDS);
-                        } catch (InterruptedException e) {
-                            e.printStackTrace();
-                        }
-                        //After a timeout, assume targetPort is dead, and just REPLICATE2 to targetPort's successor
-                        if(response == null){
-                            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REPLICATE2, key, value, getSucc(targetPort));
-                        }
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, REPLICATE1_WAIT, key, value, targetPort);
                         //To HERE. Not sure.//
                     }
                     else if(msgType.equals(REPLICATE1)){
@@ -580,22 +636,16 @@ public class SimpleDynamoProvider extends ContentProvider {
                         String sourcePort = message[2];
                         //If this doesnt work here, may need to use delete() itself
                         getContext().deleteFile(key);
+
+                        //Send confirmation back to sourcePort
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE_SUCCESS, sourcePort);
+
                         //Tell successor to delete its replica
                         String targetPort = getSucc(myPort);
 
                         //Might need lock from HERE//
                         new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE_REPLICA1, key, targetPort);
-                        //Wait for confirmation that replica was deleted by targetPort
-                        String response = null;
-                        try {
-                            response = deleteReplicaResponse.poll(8, TimeUnit.SECONDS);
-                        } catch (InterruptedException e) {
-                            e.printStackTrace();
-                        }
-                        //After a timeout, assume targetPort is dead, and just DELETE_REPLICA2 to targetPort's successor
-                        if(response == null){
-                            new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE_REPLICA2, key, getSucc(targetPort));
-                        }
+                        new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, DELETE_REPLICA1_WAIT, key, targetPort);
                         //To HERE//
                     }
                     else if(msgType.equals(DELETE_REPLICA1)){
@@ -646,25 +696,32 @@ public class SimpleDynamoProvider extends ContentProvider {
                         Cursor curs = query(null, null, "@", null, null);
                         //Send them all one-by-one to the source
                         curs.moveToFirst();
-
+                        String bigPacket = "";
                         for(int i = 0; i < curs.getCount(); i++){
                             String key = curs.getString(0);
                             String value = curs.getString(1);
 
-                            Socket sock = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(sourcePort));
-                            String msg = QUERY_ALL_RESPONSE + "," + key + "," + value + "," + myPort + '\n';
-                            DataOutputStream out = new DataOutputStream(sock.getOutputStream());
-                            out.writeBytes(msg);
+                            bigPacket = bigPacket + key + "." + value + ";";
 
                             curs.moveToNext();
                         }
+                        bigPacket = bigPacket.substring(0, bigPacket.length() - 1);
+                        Socket sock = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}), Integer.parseInt(sourcePort));
+                        String msg = QUERY_ALL_RESPONSE + "," + bigPacket + "," + myPort + '\n';
+                        DataOutputStream out = new DataOutputStream(sock.getOutputStream());
+                        out.writeBytes(msg);
                     }
                     else if(msgType.equals(QUERY_ALL_RESPONSE)){
-                        String key = message[1];
-                        String value = message[2];
-                        String sourcePort = message[3];
+                        String bigPacket = message[1];
+                        String sourcePort = message[2];
 
-                        globalDump.add(key + "," + value);
+                        String[] kvpairs = bigPacket.split(";");
+                        for(int i = 0; i < kvpairs.length; i++){
+                            String[] kv = kvpairs[i].split("\\.");
+                            String key = kv[0];
+                            String value = kv[1];
+                            globalDump.add(key + "," + value);
+                        }
                     }
                     else if(msgType.equals(REVIVAL_SUCC)){
                         /*I've received notice of my predecessor's revival.
@@ -729,6 +786,10 @@ public class SimpleDynamoProvider extends ContentProvider {
                     else if(msgType.equals(REPLICATE_SUCCESS)){
                         String sourcePort = message[1];
                         replicaResponse.offer(sourcePort); //Arbitrary string. Might as well use sourcePort.
+                    }
+                    else if(msgType.equals(DELETE_SUCCESS)){
+                        String sourcePort = message[1];
+                        deleteResponse.offer(sourcePort); //Arbitrary string. Might as well use sourcePort.
                     }
                     else if(msgType.equals(DELETE_REPLICA_SUCCESS)){
                         String sourcePort = message[1];
